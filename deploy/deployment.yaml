@@ -1,0 +1,173 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: node-volume-cleaner-system
+  labels:
+    name: node-volume-cleaner-system
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-volume-cleaner
+  namespace: node-volume-cleaner-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-volume-cleaner
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["persistentvolumes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["volumeattachments"]
+  verbs: ["get", "list", "watch", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: node-volume-cleaner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: node-volume-cleaner
+subjects:
+- kind: ServiceAccount
+  name: node-volume-cleaner
+  namespace: node-volume-cleaner-system
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-volume-cleaner-config
+  namespace: node-volume-cleaner-system
+data:
+  config.json: |
+    {
+      "waitTimeout": "5m",
+      "recheckInterval": "30s",
+      "maxRetries": 3,
+      "excludeNamespaces": [
+        "kube-system",
+        "kube-public",
+        "kube-node-lease"
+      ],
+      "excludeNodeLabels": {
+        "node.kubernetes.io/exclude-from-external-load-balancers": "true"
+      },
+      "dryRun": false,
+      "enableMetrics": true,
+      "metricsPort": 8080,
+      "logLevel": "info"
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-volume-cleaner
+  namespace: node-volume-cleaner-system
+  labels:
+    app: node-volume-cleaner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: node-volume-cleaner
+  template:
+    metadata:
+      labels:
+        app: node-volume-cleaner
+    spec:
+      serviceAccountName: node-volume-cleaner
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+      - name: node-volume-cleaner
+        image: your-registry/node-volume-cleaner:latest
+        imagePullPolicy: Always
+        args:
+        - --config=/etc/config/config.json
+        - --v=2
+        ports:
+        - name: metrics
+          containerPort: 8080
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: metrics
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: metrics
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        volumeMounts:
+        - name: config
+          mountPath: /etc/config
+          readOnly: true
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+      volumes:
+      - name: config
+        configMap:
+          name: node-volume-cleaner-config
+      terminationGracePeriodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-volume-cleaner-metrics
+  namespace: node-volume-cleaner-system
+  labels:
+    app: node-volume-cleaner
+spec:
+  type: ClusterIP
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: metrics
+    protocol: TCP
+  selector:
+    app: node-volume-cleaner
